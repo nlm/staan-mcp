@@ -50,28 +50,48 @@ func main() {
 	)
 
 	tool := mcp.NewTool("web_search",
-		mcp.WithDescription("Search the web via the Staan API (European search, built on Qwant's index). "+
-			"Returns a ranked list of results with title, URL, and snippet. "+
-			"Set ai_search=true for the richer 'Web Search for AI' tier, which adds relevance-reranked "+
-			"snippet excerpts and optionally the full page content."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(true),
+		mcp.WithDescription("Search the live web and return a ranked list of results (title, URL, snippet per result). "+
+			"Use this when you need current information, facts, or sources from outside your training data — "+
+			"news, prices, documentation, recent events, or anything you should cite rather than recall from memory. "+
+			"Not for looking up information already present in this conversation or in files you can read directly. "+
+			"Basic search (default) returns up to 10 results with title/URL/snippet only. "+
+			"Set ai_search=true for the 'Web Search for AI' tier, which additionally fetches each result page and "+
+			"returns relevance-reranked excerpts plus the full page body in Markdown — use this for research, "+
+			"citation-heavy answers, or RAG-style tasks where you need more than a snippet; skip it for a quick "+
+			"fact lookup since it fetches every result page and is noticeably slower."),
 		mcp.WithString("query",
 			mcp.Required(),
-			mcp.Description("Search query, max 400 characters. Supports Google-style site: / -site: operators."),
+			mcp.MaxLength(400),
+			mcp.Description("The search query, e.g. \"open source vector databases\" or \"pricing site:qdrant.tech\". "+
+				"Max 400 characters. Supports Google-style site: and -site: operators to include or exclude a "+
+				"domain directly in the query, as an alternative to include_domains/exclude_domains."),
 		),
 		mcp.WithString("market",
-			mcp.Description("Language/region for results. One of: fr-fr, en-us, de-de. Defaults to fr-fr."),
+			mcp.Enum("fr-fr", "en-us", "de-de"),
+			mcp.Description("Language/region to search in, as a market code. Defaults to fr-fr if omitted. "+
+				"Use en-us for English-language results, de-de for German, fr-fr for French."),
 		),
 		mcp.WithArray("include_domains",
-			mcp.Description("Restrict results to these domains (max 10). Mutually exclusive with exclude_domains."),
+			mcp.Description("Restrict results to only these domains, e.g. [\"qdrant.tech\", \"weaviate.io\"] "+
+				"(bare hostnames, no scheme or path). Max 10. Use this when the caller (not the query author) "+
+				"needs to enforce a source allowlist. Mutually exclusive with exclude_domains — do not set both."),
 			mcp.Items(map[string]any{"type": "string"}),
 		),
 		mcp.WithArray("exclude_domains",
-			mcp.Description("Exclude results from these domains (max 10)."),
+			mcp.Description("Exclude results from these domains, e.g. [\"reddit.com\", \"pinterest.com\"] "+
+				"(bare hostnames, no scheme or path). Max 10. Mutually exclusive with include_domains."),
 			mcp.Items(map[string]any{"type": "string"}),
 		),
 		mcp.WithBoolean("ai_search",
-			mcp.Description("Use the 'Web Search for AI' tier: adds relevance-reranked snippet excerpts "+
-				"and full page content (fetched as Markdown), at higher latency and cost than basic search."),
+			mcp.Description("If true, use the 'Web Search for AI' tier: fetches each result's page and adds "+
+				"relevance-reranked snippet excerpts plus the full page body (Markdown) to every result. "+
+				"Higher latency and cost than basic search — enable it only when a snippet alone won't be "+
+				"enough, e.g. summarizing an article, comparing sources in depth, or answering a question "+
+				"that needs quotes from the page. Defaults to false (basic search)."),
 			mcp.DefaultBool(false),
 		),
 	)

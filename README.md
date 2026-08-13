@@ -147,3 +147,7 @@ network calls to Staan. `main()`'s fail-fast behavior (missing
 since it calls `os.Exit`.
 
 No real Staan API key is required to build, test, or vet this project.
+
+## License
+
+[MIT](LICENSE)

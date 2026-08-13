@@ -1,4 +1,4 @@
-module staan-mcp
+module github.com/nlm/staan-mcp
 
 go 1.25.5
 

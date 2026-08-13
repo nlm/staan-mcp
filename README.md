@@ -33,6 +33,10 @@ go build -o staan-mcp .
 This produces a single self-contained binary, `staan-mcp`, with no runtime
 dependencies beyond network access to `api.staan.ai`.
 
+Prebuilt binaries for Linux and macOS (amd64 and arm64) are published on the
+[Releases](../../releases) page for every tagged version — download the
+archive for your platform instead of building from source if you prefer.
+
 ## Get a Staan API key
 
 1. Sign up at [staan.ai](https://staan.ai) — the first 1,000 requests/month

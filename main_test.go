@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -240,5 +245,133 @@ func TestValidationErrors(t *testing.T) {
 				t.Fatalf("expected IsError=true for %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestApiErrorMessages(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       int
+		body         string
+		wantContains string
+	}{
+		{"bad request", http.StatusBadRequest, `{"message":"query too long"}`, "rejected the request (status 400)"},
+		{"server error", http.StatusInternalServerError, "boom", "server error (status 500)"},
+		{"unexpected status", http.StatusNotFound, "not found", "unexpected status 404"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := apiError(tc.status, []byte(tc.body))
+			if !strings.Contains(err.Error(), tc.wantContains) {
+				t.Errorf("apiError(%d, ...) = %q, want substring %q", tc.status, err.Error(), tc.wantContains)
+			}
+		})
+	}
+}
+
+func TestApiErrorTruncatesLongBody(t *testing.T) {
+	body := strings.Repeat("x", 1000)
+	err := apiError(http.StatusInternalServerError, []byte(body))
+	msg := err.Error()
+
+	if !strings.Contains(msg, strings.Repeat("x", 500)+"...") {
+		t.Errorf("expected body truncated to 500 chars followed by '...', got: %s", msg)
+	}
+	if strings.Contains(msg, strings.Repeat("x", 501)) {
+		t.Errorf("body was not truncated: %s", msg)
+	}
+}
+
+func TestFormatResultsEmpty(t *testing.T) {
+	out := formatResults(&staanResponse{}, false)
+	if out != "No results found." {
+		t.Errorf("formatResults with no results = %q, want %q", out, "No results found.")
+	}
+}
+
+func TestFormatResultsAlteredQuery(t *testing.T) {
+	r := &staanResponse{}
+	r.Query.Q = "climat tech"
+	r.Query.AlteredQuery = "climate tech"
+	r.Web.Results = []staanResult{{Title: "T", URL: "https://example.com"}}
+
+	out := formatResults(r, false)
+	if !strings.Contains(out, `search engine used: "climate tech"`) {
+		t.Errorf("expected altered query note in output:\n%s", out)
+	}
+}
+
+func TestFormatResultsPublishedDate(t *testing.T) {
+	r := &staanResponse{}
+	r.Web.Results = []staanResult{{Title: "T", URL: "https://example.com", PublishedAt: "2024-01-01T00:00:00Z"}}
+
+	out := formatResults(r, true)
+	if !strings.Contains(out, "Published: 2024-01-01T00:00:00Z") {
+		t.Errorf("expected published date in output:\n%s", out)
+	}
+}
+
+// errReader always fails, simulating a connection dropping mid-response-body.
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) { return 0, errors.New("connection reset") }
+
+type errorBodyTransport struct{}
+
+func (errorBodyTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(errReader{}),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestSearchResponseBodyReadError(t *testing.T) {
+	c := &staanClient{apiKey: "test-key", http: &http.Client{Transport: errorBodyTransport{}}}
+
+	res, err := c.handleWebSearch(context.Background(), mcp.CallToolRequest{}, webSearchArgs{Query: "test"})
+	if err != nil {
+		t.Fatalf("expected Go error to be nil (tool error, not crash), got %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError=true when the response body fails to read")
+	}
+	tc, _ := mcp.AsTextContent(res.Content[0])
+	if !strings.Contains(tc.Text, "failed to read Staan API response") {
+		t.Errorf("expected read-failure message, got %q", tc.Text)
+	}
+}
+
+// TestMainMissingAPIKeyFailsFast re-executes this test binary as a subprocess
+// with STAAN_API_KEY unset to exercise main()'s fail-fast exit path, which
+// otherwise can't be reached from an in-process test (main calls os.Exit).
+func TestMainMissingAPIKeyFailsFast(t *testing.T) {
+	if os.Getenv("STAAN_MCP_TEST_RUN_MAIN") == "1" {
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainMissingAPIKeyFailsFast$")
+	cmd.Env = []string{"STAAN_MCP_TEST_RUN_MAIN=1"}
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "STAAN_API_KEY=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, e)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected the process to exit with an error, got: %v", err)
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("exit code = %d, want 1", exitErr.ExitCode())
+	}
+	if !strings.Contains(stderr.String(), "STAAN_API_KEY") {
+		t.Errorf("stderr should mention STAAN_API_KEY, got: %s", stderr.String())
 	}
 }

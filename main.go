@@ -207,7 +207,7 @@ func (c *staanClient) search(ctx context.Context, body staanRequest) (*staanResp
 		return nil, fmt.Errorf("failed to read Staan API response: %w", err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, apiError(resp.StatusCode, respBody)
 	}
 

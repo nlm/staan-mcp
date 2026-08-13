@@ -132,6 +132,24 @@ func TestAISearchHappyPath(t *testing.T) {
 	}
 }
 
+func TestStatus201TreatedAsSuccess(t *testing.T) {
+	// The live Staan API returns 201 Created on a successful search, not 200 OK.
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(staanResponse{
+			Web: struct {
+				Results []staanResult `json:"results"`
+			}{Results: []staanResult{{Title: "T", URL: "https://example.com", Snippet: "S"}}},
+		})
+	})
+
+	out := callToolText(t, c, webSearchArgs{Query: "test"})
+	if !strings.Contains(out, "https://example.com") {
+		t.Errorf("expected 201 response to be treated as success, got:\n%s", out)
+	}
+}
+
 func TestAuthErrorMappedToToolError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

@@ -2,9 +2,8 @@
 
 A minimal Go [MCP](https://modelcontextprotocol.io) server that wraps the
 [Staan](https://staan.ai) web search API (Qwant's European search index) as
-a single `web_search` tool, for use as a web-search extension in
-[goose](https://github.com/aaif-goose/goose) or any other MCP-compatible
-agent.
+a single `web_search` tool, for use as a web-search extension in any
+MCP-compatible agent.
 
 ## Features
 
@@ -59,8 +58,8 @@ export STAAN_API_KEY=your-key-here
 ```
 
 The server speaks MCP over stdio: it reads JSON-RPC requests from stdin and
-writes responses to stdout. It's meant to be launched by an MCP client (like
-goose), not run interactively.
+writes responses to stdout. It's meant to be launched by an MCP client, not
+run interactively.
 
 ### `web_search`
 
@@ -103,19 +102,18 @@ calling LLM sees a descriptive message instead of the connection dropping:
 - **Network failures** (DNS, connection refused, timeout) and **malformed
   JSON responses** are also caught and surfaced as tool errors.
 
-## Register with goose
+## Register with an MCP client
 
-Run `goose configure`, choose **Add Extension** → **Command-line Extension**,
-and provide:
+Configuration is client-specific, but every MCP client that supports
+command-line (stdio) extensions needs the same three things:
 
-- **Extension name**: `staan` (or any name you like)
 - **Command**: the full path to the built binary, e.g.
   `/path/to/staan-mcp/staan-mcp`
-- **Environment variable**: `STAAN_API_KEY` — goose will prompt you to
-  enter the value, which it stores and injects when launching the server.
+- **Environment variable**: `STAAN_API_KEY`, set to your Staan API key
+- Optionally, the `-timeout` flag if you want a non-default HTTP timeout
 
-Once added, goose can call the `web_search` tool automatically whenever a
-task benefits from web search.
+Once registered, the client can call the `web_search` tool automatically
+whenever a task benefits from web search.
 
 ## Project structure
 

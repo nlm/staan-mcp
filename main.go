@@ -1,6 +1,6 @@
 // Command staan-mcp is a Model Context Protocol server exposing Staan's
 // (https://staan.ai) web search API as a single `web_search` tool, for use
-// as a web-search extension in MCP-compatible agents such as goose.
+// as a web-search extension in MCP-compatible agents.
 package main
 
 import (

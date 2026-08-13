@@ -28,8 +28,29 @@ const (
 // apiBaseURL is a var (not const) so tests can point it at an httptest server.
 var apiBaseURL = "https://api.staan.ai/v2"
 
+// validMarkets are the market codes Staan accepts.
+var validMarkets = []string{"fr-fr", "en-us", "de-de"}
+
+func isValidMarket(m string) bool {
+	for _, v := range validMarkets {
+		if m == v {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
-	timeoutFlag := flag.Duration("timeout", defaultTimeout, "HTTP client timeout for Staan API requests (e.g. 10s, 15s)")
+	timeoutDefault := defaultTimeout
+	if v := os.Getenv("STAAN_TIMEOUT"); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "staan-mcp: invalid STAAN_TIMEOUT value %q: %v\n", v, err)
+			os.Exit(1)
+		}
+		timeoutDefault = parsed
+	}
+	timeoutFlag := flag.Duration("timeout", timeoutDefault, "HTTP client timeout for Staan API requests (e.g. 10s, 15s). Overrides STAAN_TIMEOUT if both are set.")
 	flag.Parse()
 
 	apiKey := os.Getenv("STAAN_API_KEY")
@@ -38,9 +59,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	defaultMarket := os.Getenv("STAAN_DEFAULT_MARKET")
+	if defaultMarket != "" && !isValidMarket(defaultMarket) {
+		fmt.Fprintf(os.Stderr, "staan-mcp: invalid STAAN_DEFAULT_MARKET value %q; must be one of %s\n", defaultMarket, strings.Join(validMarkets, ", "))
+		os.Exit(1)
+	}
+
 	client := &staanClient{
-		apiKey: apiKey,
-		http:   &http.Client{Timeout: *timeoutFlag},
+		apiKey:        apiKey,
+		http:          &http.Client{Timeout: *timeoutFlag},
+		defaultMarket: defaultMarket,
 	}
 
 	s := server.NewMCPServer(
@@ -72,8 +100,8 @@ func main() {
 		),
 		mcp.WithString("market",
 			mcp.Enum("fr-fr", "en-us", "de-de"),
-			mcp.Description("Language/region to search in, as a market code. Defaults to fr-fr if omitted. "+
-				"Use en-us for English-language results, de-de for German, fr-fr for French."),
+			mcp.Description(fmt.Sprintf("Language/region to search in, as a market code. Defaults to %s if omitted. "+
+				"Use en-us for English-language results, de-de for German, fr-fr for French.", marketDescriptionDefault(client.defaultMarket))),
 		),
 		mcp.WithArray("include_domains",
 			mcp.Description("Restrict results to only these domains, e.g. [\"qdrant.tech\", \"weaviate.io\"] "+
@@ -114,8 +142,18 @@ type webSearchArgs struct {
 }
 
 type staanClient struct {
-	apiKey string
-	http   *http.Client
+	apiKey        string
+	http          *http.Client
+	defaultMarket string // "" means fall through to the Staan API's own default (fr-fr)
+}
+
+// marketDescriptionDefault returns the effective default market for use in
+// the tool's description text.
+func marketDescriptionDefault(configured string) string {
+	if configured != "" {
+		return configured + " (server-configured)"
+	}
+	return "fr-fr"
 }
 
 // staanRequest is the JSON body sent to POST /v2/search/web.
@@ -181,9 +219,14 @@ func (c *staanClient) handleWebSearch(ctx context.Context, _ mcp.CallToolRequest
 		return mcp.NewToolResultError("include_domains and exclude_domains are mutually exclusive"), nil
 	}
 
+	market := args.Market
+	if market == "" {
+		market = c.defaultMarket
+	}
+
 	reqBody := staanRequest{
 		Q:              query,
-		Market:         args.Market,
+		Market:         market,
 		IncludeDomains: args.IncludeDomains,
 		ExcludeDomains: args.ExcludeDomains,
 	}

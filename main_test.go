@@ -94,6 +94,36 @@ func TestBasicSearchHappyPath(t *testing.T) {
 	}
 }
 
+func TestDefaultMarketAppliedWhenArgOmitted(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body staanRequest
+		json.NewDecoder(r.Body).Decode(&body)
+		if body.Market != "de-de" {
+			t.Errorf("market = %q, want de-de (from defaultMarket)", body.Market)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(staanResponse{})
+	})
+	c.defaultMarket = "de-de"
+
+	callToolText(t, c, webSearchArgs{Query: "test"})
+}
+
+func TestExplicitMarketOverridesDefault(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body staanRequest
+		json.NewDecoder(r.Body).Decode(&body)
+		if body.Market != "en-us" {
+			t.Errorf("market = %q, want en-us (explicit arg should win)", body.Market)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(staanResponse{})
+	})
+	c.defaultMarket = "de-de"
+
+	callToolText(t, c, webSearchArgs{Query: "test", Market: "en-us"})
+}
+
 func TestAISearchHappyPath(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		var body staanRequest
@@ -311,6 +341,28 @@ func TestFormatResultsPublishedDate(t *testing.T) {
 	}
 }
 
+func TestIsValidMarket(t *testing.T) {
+	for _, m := range validMarkets {
+		if !isValidMarket(m) {
+			t.Errorf("isValidMarket(%q) = false, want true", m)
+		}
+	}
+	for _, m := range []string{"", "xx-xx", "FR-FR", "fr_fr"} {
+		if isValidMarket(m) {
+			t.Errorf("isValidMarket(%q) = true, want false", m)
+		}
+	}
+}
+
+func TestMarketDescriptionDefault(t *testing.T) {
+	if got := marketDescriptionDefault(""); got != "fr-fr" {
+		t.Errorf("marketDescriptionDefault(\"\") = %q, want %q", got, "fr-fr")
+	}
+	if got := marketDescriptionDefault("de-de"); got != "de-de (server-configured)" {
+		t.Errorf("marketDescriptionDefault(\"de-de\") = %q, want %q", got, "de-de (server-configured)")
+	}
+}
+
 // errReader always fails, simulating a connection dropping mid-response-body.
 type errReader struct{}
 
@@ -342,36 +394,93 @@ func TestSearchResponseBodyReadError(t *testing.T) {
 	}
 }
 
-// TestMainMissingAPIKeyFailsFast re-executes this test binary as a subprocess
-// with STAAN_API_KEY unset to exercise main()'s fail-fast exit path, which
-// otherwise can't be reached from an in-process test (main calls os.Exit).
+// runMainSubprocess re-executes this test binary with main() invoked in a
+// child process, so tests can exercise main()'s os.Exit paths (which can't
+// be reached from an in-process test). unsetEnv lists variable names to
+// strip from the child's environment before it starts; setEnv is applied on
+// top of that.
+func runMainSubprocess(t *testing.T, testName string, unsetEnv []string, setEnv map[string]string) (exitCode int, stderr string) {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0], "-test.run=^"+testName+"$")
+	env := []string{"STAAN_MCP_TEST_RUN_MAIN=1"}
+outer:
+	for _, e := range os.Environ() {
+		for _, u := range unsetEnv {
+			if strings.HasPrefix(e, u+"=") {
+				continue outer
+			}
+		}
+		env = append(env, e)
+	}
+	for k, v := range setEnv {
+		env = append(env, k+"="+v)
+	}
+	cmd.Env = env
+
+	var buf bytes.Buffer
+	cmd.Stderr = &buf
+
+	err := cmd.Run()
+	if err == nil {
+		return 0, buf.String()
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected the process to exit normally or with *exec.ExitError, got: %v", err)
+	}
+	return exitErr.ExitCode(), buf.String()
+}
+
 func TestMainMissingAPIKeyFailsFast(t *testing.T) {
 	if os.Getenv("STAAN_MCP_TEST_RUN_MAIN") == "1" {
 		main()
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestMainMissingAPIKeyFailsFast$")
-	cmd.Env = []string{"STAAN_MCP_TEST_RUN_MAIN=1"}
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "STAAN_API_KEY=") {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	code, stderr := runMainSubprocess(t, "TestMainMissingAPIKeyFailsFast", []string{"STAAN_API_KEY"}, nil)
 
-	err := cmd.Run()
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "STAAN_API_KEY") {
+		t.Errorf("stderr should mention STAAN_API_KEY, got: %s", stderr)
+	}
+}
 
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("expected the process to exit with an error, got: %v", err)
+func TestMainInvalidTimeoutFailsFast(t *testing.T) {
+	if os.Getenv("STAAN_MCP_TEST_RUN_MAIN") == "1" {
+		main()
+		return
 	}
-	if exitErr.ExitCode() != 1 {
-		t.Errorf("exit code = %d, want 1", exitErr.ExitCode())
+
+	code, stderr := runMainSubprocess(t, "TestMainInvalidTimeoutFailsFast", nil, map[string]string{
+		"STAAN_TIMEOUT": "not-a-duration",
+	})
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "STAAN_API_KEY") {
-		t.Errorf("stderr should mention STAAN_API_KEY, got: %s", stderr.String())
+	if !strings.Contains(stderr, "STAAN_TIMEOUT") {
+		t.Errorf("stderr should mention STAAN_TIMEOUT, got: %s", stderr)
+	}
+}
+
+func TestMainInvalidDefaultMarketFailsFast(t *testing.T) {
+	if os.Getenv("STAAN_MCP_TEST_RUN_MAIN") == "1" {
+		main()
+		return
+	}
+
+	code, stderr := runMainSubprocess(t, "TestMainInvalidDefaultMarketFailsFast", nil, map[string]string{
+		"STAAN_API_KEY":        "fake-key-for-startup-check",
+		"STAAN_DEFAULT_MARKET": "xx-xx",
+	})
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "STAAN_DEFAULT_MARKET") {
+		t.Errorf("stderr should mention STAAN_DEFAULT_MARKET, got: %s", stderr)
 	}
 }

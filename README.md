@@ -48,12 +48,22 @@ archive for your platform instead of building from source if you prefer.
 | Setting | How | Default | Notes |
 |---|---|---|---|
 | Staan API key | env var `STAAN_API_KEY` | — (required) | Read once at startup. The server prints an error to stderr and exits with status 1 if it's unset. |
-| HTTP client timeout | flag `-timeout` | `10s` | Go duration syntax, e.g. `-timeout 15s`. Applies to every request to the Staan API. Enriched (`ai_search=true`) searches are slower — the Staan docs recommend 8–10s for those, so raise this if you see timeouts with `ai_search` enabled. |
+| HTTP client timeout | env var `STAAN_TIMEOUT`, or flag `-timeout` | `10s` | Go duration syntax, e.g. `STAAN_TIMEOUT=15s` or `-timeout 15s`. The flag takes precedence if both are set — most MCP clients only let you configure command-line extensions via environment variables, so `STAAN_TIMEOUT` is usually the one you want. Applies to every request to the Staan API. Enriched (`ai_search=true`) searches are slower — the Staan docs recommend 8–10s for those, so raise this if you see timeouts with `ai_search` enabled. |
+| Default market | env var `STAAN_DEFAULT_MARKET` | `fr-fr` (Staan's own default) | One of `fr-fr`, `en-us`, `de-de`. Used whenever a `web_search` call omits `market`. Invalid values fail fast at startup. The `web_search` tool's description is generated at startup to reflect the configured default, so the calling LLM sees the right value. |
 
 ## Run
 
 ```bash
 export STAAN_API_KEY=your-key-here
+./staan-mcp
+```
+
+With the optional settings:
+
+```bash
+export STAAN_API_KEY=your-key-here
+export STAAN_TIMEOUT=15s
+export STAAN_DEFAULT_MARKET=en-us
 ./staan-mcp
 ```
 
@@ -110,7 +120,10 @@ command-line (stdio) extensions needs the same three things:
 - **Command**: the full path to the built binary, e.g.
   `/path/to/staan-mcp/staan-mcp`
 - **Environment variable**: `STAAN_API_KEY`, set to your Staan API key
-- Optionally, the `-timeout` flag if you want a non-default HTTP timeout
+- Optionally, `STAAN_TIMEOUT` and `STAAN_DEFAULT_MARKET` — see
+  [Configuration](#configuration). Since most clients only expose
+  environment variables (not CLI flags) for stdio extensions, these are
+  generally easier to set here than `-timeout`.
 
 Once registered, the client can call the `web_search` tool automatically
 whenever a task benefits from web search.

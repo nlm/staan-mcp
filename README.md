@@ -48,7 +48,7 @@ archive for your platform instead of building from source if you prefer.
 | Setting | How | Default | Notes |
 |---|---|---|---|
 | Staan API key | env var `STAAN_API_KEY` | — (required) | Read once at startup. The server prints an error to stderr and exits with status 1 if it's unset. |
-| HTTP client timeout | env var `STAAN_TIMEOUT`, or flag `-timeout` | `10s` | Go duration syntax, e.g. `STAAN_TIMEOUT=15s` or `-timeout 15s`. The flag takes precedence if both are set — most MCP clients only let you configure command-line extensions via environment variables, so `STAAN_TIMEOUT` is usually the one you want. Applies to every request to the Staan API. Enriched (`ai_search=true`) searches are slower — the Staan docs recommend 8–10s for those, so raise this if you see timeouts with `ai_search` enabled. |
+| HTTP client timeout | env var `STAAN_TIMEOUT`, or flag `-timeout` | `10s` | Go duration syntax, e.g. `STAAN_TIMEOUT=15s` or `-timeout 15s`. Must be greater than zero — a zero or negative value fails fast at startup rather than disabling the timeout. The flag takes precedence if both are set — most MCP clients only let you configure command-line extensions via environment variables, so `STAAN_TIMEOUT` is usually the one you want. Applies to every request to the Staan API. Enriched (`ai_search=true`) searches are slower — the Staan docs recommend 8–10s for those, so raise this if you see timeouts with `ai_search` enabled. |
 | Default market | env var `STAAN_DEFAULT_MARKET` | `fr-fr` (Staan's own default) | One of `fr-fr`, `en-us`, `de-de`. Used whenever a `web_search` call omits `market`. Invalid values fail fast at startup. The `web_search` tool's description is generated at startup to reflect the configured default, so the calling LLM sees the right value. |
 
 ## Run
@@ -76,7 +76,7 @@ run interactively.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `query` | string | yes | Search query, max 400 characters. Supports `site:` / `-site:` operators. |
-| `market` | string (enum) | no | One of `fr-fr`, `en-us`, `de-de`. Defaults to `fr-fr`. |
+| `market` | string (enum) | no | One of `fr-fr`, `en-us`, `de-de`. Defaults to `fr-fr`, or to `STAAN_DEFAULT_MARKET` if configured. |
 | `include_domains` | string[] | no | Restrict results to these bare hostnames (max 10, e.g. `["qdrant.tech"]`). Mutually exclusive with `exclude_domains`. |
 | `exclude_domains` | string[] | no | Exclude these bare hostnames from results (max 10). |
 | `ai_search` | boolean | no | Use the "Web Search for AI" tier: adds relevance-reranked snippet excerpts and full page content (Markdown). Higher latency/cost than basic search. Default `false`. |
@@ -93,9 +93,13 @@ Found 3 result(s) for "open source vector databases":
 2. ...
 ```
 
-With `ai_search=true`, each result additionally carries a `Published:` date
-(when known), a `Relevant excerpts:` block of scored passages, and a
-`Full content:` block with the fetched page body.
+Each result carries a `Published:` date when Staan reports one, regardless of
+`ai_search`. With `ai_search=true`, each result additionally carries a
+`Relevant excerpts:` block of scored passages and a `Full content:` block
+with the fetched page body (capped at 25,000 characters, truncated with a
+note if the page is longer) wrapped in explicit `BEGIN`/`END untrusted
+external content` markers — the fetched page is data, not instructions, and
+should be treated as untrusted by the calling model.
 
 ### Error handling
 
@@ -111,6 +115,15 @@ calling LLM sees a descriptive message instead of the connection dropping:
   including the status code and response body.
 - **Network failures** (DNS, connection refused, timeout) and **malformed
   JSON responses** are also caught and surfaced as tool errors.
+
+### Logging
+
+Every `web_search` call writes one summary line to stderr: query length,
+market, `ai_search`, outcome, duration, result count, and the Staan
+`search_id` (for cross-referencing with Staan support). The raw query text
+and the API key are never logged. stdout is reserved for the MCP JSON-RPC
+protocol, so all logging goes to stderr — most MCP clients surface a
+server's stderr in their own logs.
 
 ## Register with an MCP client
 
@@ -153,9 +166,10 @@ go test -cover ./...      # run with coverage summary
 Tests use `httptest.Server` (and a couple of custom `http.RoundTripper`s for
 network-failure cases) to exercise the full request/response path — including
 the AI tier, HTTP error mapping, and input validation — without making real
-network calls to Staan. `main()`'s fail-fast behavior (missing
-`STAAN_API_KEY`) is tested by re-executing the test binary as a subprocess,
-since it calls `os.Exit`.
+network calls to Staan. `main()`'s fail-fast behaviors (missing
+`STAAN_API_KEY`, an invalid or non-positive `STAAN_TIMEOUT`, an invalid
+`STAAN_DEFAULT_MARKET`) are tested by re-executing the test binary as a
+subprocess, since they call `os.Exit`.
 
 No real Staan API key is required to build, test, or vet this project.
 

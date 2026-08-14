@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,13 +23,10 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *staanClient {
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	old := apiBaseURL
-	apiBaseURL = srv.URL
-	t.Cleanup(func() { apiBaseURL = old })
-
 	return &staanClient{
-		apiKey: "test-key",
-		http:   &http.Client{Timeout: 5 * time.Second},
+		apiKey:  "test-key",
+		http:    &http.Client{Timeout: 5 * time.Second},
+		baseURL: srv.URL,
 	}
 }
 
@@ -72,11 +70,9 @@ func TestBasicSearchHappyPath(t *testing.T) {
 				Results []staanResult `json:"results"`
 			}{Results: []staanResult{
 				{
-					Title:      "Top open-source LLMs in 2024",
-					URL:        "https://www.example.com/open-source-llms",
-					Snippet:    "A comprehensive guide to the best open-source large language models...",
-					DisplayURL: "www.example.com > ai > open-source-llms",
-					Hostname:   "www.example.com",
+					Title:   "Top open-source LLMs in 2024",
+					URL:     "https://www.example.com/open-source-llms",
+					Snippet: "A comprehensive guide to the best open-source large language models...",
 				},
 			}},
 		})
@@ -160,7 +156,12 @@ func TestAISearchHappyPath(t *testing.T) {
 
 	out := callToolText(t, c, webSearchArgs{Query: "vector database comparison", AISearch: true})
 
-	for _, want := range []string{"Relevant excerpts", "score 0.91", "Pinecone is a fully managed", "Full content (markdown, 22100 chars)", "This guide covers"} {
+	for _, want := range []string{
+		"Relevant excerpts", "score 0.91", "Pinecone is a fully managed",
+		"Full content (markdown, 22100 chars)", "This guide covers",
+		"BEGIN untrusted external content fetched from https://www.example.com/vector-dbs",
+		"END untrusted external content",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\nfull output:\n%s", want, out)
 		}
@@ -236,10 +237,7 @@ func TestMalformedJSONMappedToToolError(t *testing.T) {
 }
 
 func TestServerUnreachableMappedToToolError(t *testing.T) {
-	c := &staanClient{apiKey: "test-key", http: &http.Client{Timeout: 2 * time.Second}}
-	old := apiBaseURL
-	apiBaseURL = "http://127.0.0.1:1" // nothing listening
-	t.Cleanup(func() { apiBaseURL = old })
+	c := &staanClient{apiKey: "test-key", http: &http.Client{Timeout: 2 * time.Second}, baseURL: "http://127.0.0.1:1"}
 
 	res, err := c.handleWebSearch(context.Background(), mcp.CallToolRequest{}, webSearchArgs{Query: "test"})
 	if err != nil {
@@ -264,6 +262,7 @@ func TestValidationErrors(t *testing.T) {
 		{"too many include domains", webSearchArgs{Query: "q", IncludeDomains: make([]string, 11)}},
 		{"too many exclude domains", webSearchArgs{Query: "q", ExcludeDomains: make([]string, 11)}},
 		{"mutually exclusive domains", webSearchArgs{Query: "q", IncludeDomains: []string{"a.com"}, ExcludeDomains: []string{"b.com"}}},
+		{"invalid market", webSearchArgs{Query: "q", Market: "xx-xx"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -275,6 +274,27 @@ func TestValidationErrors(t *testing.T) {
 				t.Fatalf("expected IsError=true for %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestQueryLengthCountsRunesNotBytes(t *testing.T) {
+	// 400 "é" runes is 800 bytes; a byte-based length check would wrongly
+	// reject this, but the schema and error message both promise 400
+	// *characters*.
+	query := strings.Repeat("é", 400)
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(staanResponse{})
+	})
+
+	res, err := c.handleWebSearch(context.Background(), mcp.CallToolRequest{}, webSearchArgs{Query: query})
+	if err != nil {
+		t.Fatalf("expected Go error to be nil, got %v", err)
+	}
+	if res.IsError {
+		tc, _ := mcp.AsTextContent(res.Content[0])
+		t.Fatalf("expected a 400-rune query to be accepted, got error: %s", tc.Text)
 	}
 }
 
@@ -341,6 +361,55 @@ func TestFormatResultsPublishedDate(t *testing.T) {
 	}
 }
 
+func TestFormatResultsFullContentShownEvenWhenLengthZero(t *testing.T) {
+	r := &staanResponse{}
+	r.Web.Results = []staanResult{{Title: "T", URL: "https://example.com"}}
+	r.Web.Results[0].FullContent = &struct {
+		Text   string `json:"text"`
+		Format string `json:"format"`
+		Length int    `json:"length"`
+	}{Text: "some body text", Format: "markdown", Length: 0}
+
+	out := formatResults(r, true)
+	if !strings.Contains(out, "some body text") {
+		t.Errorf("expected full content to be shown when Text is non-empty even if Length is 0:\n%s", out)
+	}
+}
+
+func TestFormatResultsFullContentOmittedWhenTextEmpty(t *testing.T) {
+	r := &staanResponse{}
+	r.Web.Results = []staanResult{{Title: "T", URL: "https://example.com"}}
+	r.Web.Results[0].FullContent = &struct {
+		Text   string `json:"text"`
+		Format string `json:"format"`
+		Length int    `json:"length"`
+	}{Text: "", Format: "markdown", Length: 500}
+
+	out := formatResults(r, true)
+	if strings.Contains(out, "Full content") {
+		t.Errorf("expected full content section to be omitted when Text is empty:\n%s", out)
+	}
+}
+
+func TestFormatResultsFullContentTruncated(t *testing.T) {
+	r := &staanResponse{}
+	longText := strings.Repeat("a", maxFullContentChars+5000)
+	r.Web.Results = []staanResult{{Title: "T", URL: "https://example.com"}}
+	r.Web.Results[0].FullContent = &struct {
+		Text   string `json:"text"`
+		Format string `json:"format"`
+		Length int    `json:"length"`
+	}{Text: longText, Format: "markdown", Length: len(longText)}
+
+	out := formatResults(r, true)
+	if !strings.Contains(out, "truncated to 25000") {
+		t.Errorf("expected a truncation note in output:\n%s", out[:200])
+	}
+	if strings.Count(out, "a") > maxFullContentChars+1000 {
+		t.Errorf("expected full content to be truncated to ~%d chars, output is longer", maxFullContentChars)
+	}
+}
+
 func TestIsValidMarket(t *testing.T) {
 	for _, m := range validMarkets {
 		if !isValidMarket(m) {
@@ -363,6 +432,102 @@ func TestMarketDescriptionDefault(t *testing.T) {
 	}
 }
 
+func TestHandleWebSearchLogsOneLinePerCall(t *testing.T) {
+	var buf bytes.Buffer
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(staanResponse{
+			SearchID: "search-123",
+			Web: struct {
+				Results []staanResult `json:"results"`
+			}{Results: []staanResult{{Title: "T", URL: "https://example.com"}}},
+		})
+	})
+	c.logger = log.New(&buf, "", 0)
+
+	secretQuery := "this text must never appear in logs"
+	callToolText(t, c, webSearchArgs{Query: secretQuery, Market: "en-us"})
+
+	logLine := buf.String()
+	if strings.Contains(logLine, secretQuery) {
+		t.Errorf("log line must not contain raw query text, got: %s", logLine)
+	}
+	for _, want := range []string{"outcome=ok", "market=\"en-us\"", "search_id=\"search-123\"", "results=1"} {
+		if !strings.Contains(logLine, want) {
+			t.Errorf("log line missing %q, got: %s", want, logLine)
+		}
+	}
+}
+
+func TestHandleWebSearchLogsErrorOutcome(t *testing.T) {
+	var buf bytes.Buffer
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	c.logger = log.New(&buf, "", 0)
+
+	callToolText(t, c, webSearchArgs{Query: "test"})
+
+	if !strings.Contains(buf.String(), "outcome=error") {
+		t.Errorf("expected outcome=error in log line, got: %s", buf.String())
+	}
+}
+
+func TestNoLoggerDoesNotPanic(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(staanResponse{})
+	})
+	// c.logger is nil by default from newTestClient.
+	callToolText(t, c, webSearchArgs{Query: "test"})
+}
+
+func TestNewWebSearchToolSchema(t *testing.T) {
+	tool := newWebSearchTool("de-de")
+
+	if tool.Name != "web_search" {
+		t.Errorf("tool name = %q, want web_search", tool.Name)
+	}
+
+	props, ok := tool.InputSchema.Properties["market"].(map[string]any)
+	if !ok {
+		t.Fatalf("market property missing or wrong type: %#v", tool.InputSchema.Properties["market"])
+	}
+	enum, ok := props["enum"].([]string)
+	if !ok {
+		t.Fatalf("market property has no string enum: %#v", props)
+	}
+	if len(enum) != len(validMarkets) {
+		t.Errorf("market enum = %v, want %v", enum, validMarkets)
+	}
+	for _, m := range validMarkets {
+		found := false
+		for _, e := range enum {
+			if e == m {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("market enum %v missing %q", enum, m)
+		}
+	}
+
+	required := false
+	for _, r := range tool.InputSchema.Required {
+		if r == "query" {
+			required = true
+		}
+	}
+	if !required {
+		t.Errorf("query should be required, tool.InputSchema.Required = %v", tool.InputSchema.Required)
+	}
+
+	desc, _ := props["description"].(string)
+	if !strings.Contains(desc, "de-de (server-configured)") {
+		t.Errorf("market description should reflect the configured default, got: %s", desc)
+	}
+}
+
 // errReader always fails, simulating a connection dropping mid-response-body.
 type errReader struct{}
 
@@ -379,7 +544,7 @@ func (errorBodyTransport) RoundTrip(*http.Request) (*http.Response, error) {
 }
 
 func TestSearchResponseBodyReadError(t *testing.T) {
-	c := &staanClient{apiKey: "test-key", http: &http.Client{Transport: errorBodyTransport{}}}
+	c := &staanClient{apiKey: "test-key", http: &http.Client{Transport: errorBodyTransport{}}, baseURL: "http://unused.invalid"}
 
 	res, err := c.handleWebSearch(context.Background(), mcp.CallToolRequest{}, webSearchArgs{Query: "test"})
 	if err != nil {
@@ -456,6 +621,25 @@ func TestMainInvalidTimeoutFailsFast(t *testing.T) {
 
 	code, stderr := runMainSubprocess(t, "TestMainInvalidTimeoutFailsFast", nil, map[string]string{
 		"STAAN_TIMEOUT": "not-a-duration",
+	})
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "STAAN_TIMEOUT") {
+		t.Errorf("stderr should mention STAAN_TIMEOUT, got: %s", stderr)
+	}
+}
+
+func TestMainZeroTimeoutFailsFast(t *testing.T) {
+	if os.Getenv("STAAN_MCP_TEST_RUN_MAIN") == "1" {
+		main()
+		return
+	}
+
+	code, stderr := runMainSubprocess(t, "TestMainZeroTimeoutFailsFast", nil, map[string]string{
+		"STAAN_API_KEY": "fake-key-for-startup-check",
+		"STAAN_TIMEOUT": "0s",
 	})
 
 	if code != 1 {

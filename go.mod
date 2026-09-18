@@ -2,7 +2,7 @@ module github.com/nlm/staan-mcp
 
 go 1.25.13
 
-require github.com/mark3labs/mcp-go v0.58.0
+require github.com/mark3labs/mcp-go v1.1.0
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect

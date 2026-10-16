@@ -20,7 +20,7 @@ MCP-compatible agent.
 
 ## Requirements
 
-- Go 1.25 or later (see `go.mod`) to build from source.
+- Go 1.26 or later (see `go.mod`) to build from source.
 - A Staan API key (see below).
 
 ## Build
@@ -99,7 +99,22 @@ Each result carries a `Published:` date when Staan reports one, regardless of
 with the fetched page body (capped at 25,000 characters, truncated with a
 note if the page is longer) wrapped in explicit `BEGIN`/`END untrusted
 external content` markers — the fetched page is data, not instructions, and
-should be treated as untrusted by the calling model.
+should be treated as untrusted by the calling model. Both markers carry a
+random id that is fresh for every response, so a page that embeds a fake
+`END` line can't produce one with the right id. Line breaks in one-line
+fields (title, URL, snippet, excerpts, date) are flattened to spaces, so
+those fields can't start lines of their own.
+
+### Server instructions
+
+The server sends MCP `instructions` in its `initialize` response. They give
+the model guidance that applies across calls: what the server is for, to
+start with a basic search and use `ai_search` only on targeted pages (snippets
+aren't reliable for exact values), to keep the Staan quota in mind, when a
+country-specific market helps, and to cite URLs and `Published:` dates.
+Per-parameter guidance and the note that results are untrusted third-party
+content stay in the `web_search` tool schema, because not every client
+passes server instructions to the model.
 
 ### Error handling
 
